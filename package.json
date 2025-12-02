@@ -1,23 +1,19 @@
-#13 exporting cache to client directory
-#13 writing cache image manifest sha256:601a5a9b8405a12a458701caba629f88b3b36c5a2f09aea507d187d7cb3fa95f done
-#13 DONE 0.1s
-> claude-drive-mcp-expanded@1.0.0 start
-> node server.js
-/app/server.js:11
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-                   ^
-Error [ERR_REQUIRE_ESM]: require() of ES Module /app/node_modules/@modelcontextprotocol/sdk/dist/server/index.js from /app/server.js not supported.
-Instead change the require of index.js in /app/server.js to a dynamic import() which is available in all CommonJS modules.
-    at Object.<anonymous> (/app/server.js:11:20) {
-  code: 'ERR_REQUIRE_ESM'
+{
+  "name": "claude-drive-mcp-expanded",
+  "version": "1.0.0",
+  "description": "Google Drive MCP helper with MCP protocol support",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "googleapis": "^118.0.0",
+    "body-parser": "^1.20.2",
+    "@modelcontextprotocol/sdk": "^0.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
-Node.js v18.20.8
-==> Exited with status 1
-==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
-> claude-drive-mcp-expanded@1.0.0 start
-> node server.js
-npm error path /app
-npm error command failed
-npm error signal SIGTERM
-npm error command sh -c node server.js
-npm error A complete log of this run can be found in: /root/.npm/_logs/2025-12-02T09_44_38_724Z-debug-0.log

@@ -1,15 +1,19 @@
 // server.js
-// Expanded Google Drive MCP helper for Claude - WITH MCP PROTOCOL SUPPORT
+// Expanded Google Drive MCP helper for Claude - WITH MCP PROTOCOL SUPPORT (ES Module version)
 // Restricted to DRIVE_FOLDER_NAME (Photo_Storage)
-// Features: MCP protocol + REST endpoints, recursive listing, search, file CRUD, folder CRUD, metadata, batch ops
 
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const { google } = require('googleapis');
-const bodyParser = require('body-parser');
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
-const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { google } from 'googleapis';
+import bodyParser from 'body-parser';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+
+// ES Module equivalents for __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const PORT = process.env.PORT || 10000;
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
@@ -332,7 +336,7 @@ mcpServer.setRequestHandler('tools/call', async (request) => {
   }
 });
 
-// ========== REST API (ALL EXISTING ENDPOINTS) ==========
+// ========== UTILITY FUNCTIONS ==========
 
 function protectiveMiddleware(req, res, next) {
   if (MCP_SHARED_SECRET) {
@@ -409,7 +413,8 @@ async function isDescendant(drive, candidateId, rootId) {
   return false;
 }
 
-// Info
+// ========== REST API ROUTES ==========
+
 app.get('/info', async (req, res) => {
   res.json({
     name: 'Claude Google Drive MCP (expanded with MCP protocol)',
@@ -418,19 +423,16 @@ app.get('/info', async (req, res) => {
   });
 });
 
-// Start OAuth
 app.get('/auth', (req, res) => {
   const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
   res.redirect(url);
 });
 
-// Add /authorize endpoint for Claude connector
 app.get('/authorize', (req, res) => {
   const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
   res.redirect(url);
 });
 
-// OAuth callback
 app.get('/oauth2callback', async (req, res) => {
   try {
     if (!req.query.code) return res.status(400).send('Missing code');
@@ -445,7 +447,6 @@ app.get('/oauth2callback', async (req, res) => {
   }
 });
 
-// Recursive list
 app.get('/list', async (req, res) => {
   try {
     const drive = await getDrive();
@@ -477,7 +478,6 @@ app.get('/list', async (req, res) => {
   }
 });
 
-// Metadata
 app.get('/meta/:id', async (req, res) => {
   try {
     const drive = await getDrive();
@@ -492,7 +492,6 @@ app.get('/meta/:id', async (req, res) => {
   }
 });
 
-// Download file
 app.get('/file/:id', async (req, res) => {
   try {
     const drive = await getDrive();
@@ -518,7 +517,6 @@ app.get('/file/:id', async (req, res) => {
   }
 });
 
-// Upload/update file
 app.post('/upload', async (req, res) => {
   try {
     const { name, content, mimeType, parentId, fileId } = req.body;
@@ -555,7 +553,6 @@ app.post('/upload', async (req, res) => {
   }
 });
 
-// Create folder
 app.post('/folder', async (req, res) => {
   try {
     const { name, parentId } = req.body;
@@ -576,7 +573,6 @@ app.post('/folder', async (req, res) => {
   }
 });
 
-// Move
 app.post('/move', async (req, res) => {
   try {
     const { id, newParentId } = req.body;
@@ -595,7 +591,6 @@ app.post('/move', async (req, res) => {
   }
 });
 
-// Batch delete
 app.post('/batch-delete', async (req, res) => {
   try {
     const { ids } = req.body;
@@ -617,7 +612,6 @@ app.post('/batch-delete', async (req, res) => {
   }
 });
 
-// Search
 app.get('/search', async (req, res) => {
   try {
     const q = (req.query.q || '').trim();
@@ -667,7 +661,6 @@ app.get('/search', async (req, res) => {
   }
 });
 
-// Rename
 app.post('/rename', async (req, res) => {
   try {
     const { id, newName } = req.body;
@@ -683,7 +676,6 @@ app.post('/rename', async (req, res) => {
   }
 });
 
-// Delete single
 app.delete('/delete/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -698,20 +690,18 @@ app.delete('/delete/:id', async (req, res) => {
   }
 });
 
-// Health
 app.get('/health', (req, res) => res.json({ ok: true, mcpEnabled: true }));
 
 // Start Express server
 app.listen(PORT, () => console.log(`MCP server listening on ${PORT}`));
 
-// Start MCP server for stdio transport (for local MCP clients)
+// Start MCP server for stdio transport
 async function main() {
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
   console.log('MCP protocol server started');
 }
 
-// Only start MCP stdio if not in web server mode
 if (process.env.MCP_STDIO_MODE === 'true') {
   main().catch(console.error);
 }

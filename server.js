@@ -1,27 +1,21 @@
 // server.js
-// Expanded Google Drive MCP helper for Claude - WITH MCP PROTOCOL SUPPORT (ES Module version)
-// Restricted to DRIVE_FOLDER_NAME (Photo_Storage)
+// Expanded Google Drive MCP helper for Claude - restricted to DRIVE_FOLDER_NAME (Photo_Storage)
+// Features: recursive listing, search, file CRUD, folder CRUD, metadata, batch ops, shared-secret protection.
+// NOTE: For production store tokens in a secure store. This sample stores them in tokens.json (simple).
 
-import express from 'express';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { google } from 'googleapis';
-import bodyParser from 'body-parser';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const { google } = require('googleapis');
+const bodyParser = require('body-parser');
 
-// ES Module equivalents for __dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const DRIVE_FOLDER_NAME = process.env.DRIVE_FOLDER_NAME || 'Photo_Storage';
 const TOKEN_FILE = path.join(__dirname, 'tokens.json');
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change_this_session_secret';
-const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET || '';
+const MCP_SHARED_SECRET = process.env.MCP_SHARED_SECRET || ''; // optional: set to require header
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error('Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in env.');
@@ -39,306 +33,12 @@ const oauth2Client = new google.auth.OAuth2(
 );
 
 const SCOPES = [
-  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/drive', // full drive API but we enforce folder restriction
   'https://www.googleapis.com/auth/drive.metadata.readonly'
 ];
 
-// ========== MCP SERVER SETUP ==========
-const mcpServer = new Server(
-  {
-    name: 'google-drive-mcp',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
-);
-
-// Define MCP Tools
-mcpServer.setRequestHandler('tools/list', async () => {
-  return {
-    tools: [
-      {
-        name: 'list_files',
-        description: 'List files and folders in Photo_Storage (recursive)',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            parentId: { type: 'string', description: 'Parent folder ID (optional)' },
-            depth: { type: 'number', description: 'Recursion depth (default 4)' }
-          }
-        }
-      },
-      {
-        name: 'create_folder',
-        description: 'Create a new folder in Photo_Storage',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Folder name' },
-            parentId: { type: 'string', description: 'Parent folder ID (optional)' }
-          },
-          required: ['name']
-        }
-      },
-      {
-        name: 'upload_file',
-        description: 'Upload or update a file in Photo_Storage',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'File name' },
-            content: { type: 'string', description: 'Base64 encoded content' },
-            mimeType: { type: 'string', description: 'MIME type' },
-            parentId: { type: 'string', description: 'Parent folder ID (optional)' },
-            fileId: { type: 'string', description: 'File ID to update (optional)' }
-          }
-        }
-      },
-      {
-        name: 'read_file',
-        description: 'Read file content from Photo_Storage',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            fileId: { type: 'string', description: 'File ID to read' }
-          },
-          required: ['fileId']
-        }
-      },
-      {
-        name: 'search_files',
-        description: 'Search files by name or content',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Search query' },
-            contentSearch: { type: 'boolean', description: 'Search file contents (default false)' }
-          },
-          required: ['query']
-        }
-      },
-      {
-        name: 'move_item',
-        description: 'Move a file or folder to a new parent',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Item ID to move' },
-            newParentId: { type: 'string', description: 'New parent folder ID' }
-          },
-          required: ['id', 'newParentId']
-        }
-      },
-      {
-        name: 'rename_item',
-        description: 'Rename a file or folder',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Item ID to rename' },
-            newName: { type: 'string', description: 'New name' }
-          },
-          required: ['id', 'newName']
-        }
-      },
-      {
-        name: 'delete_item',
-        description: 'Delete a file or folder',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            id: { type: 'string', description: 'Item ID to delete' }
-          },
-          required: ['id']
-        }
-      }
-    ]
-  };
-});
-
-// Handle MCP tool calls
-mcpServer.setRequestHandler('tools/call', async (request) => {
-  const { name, arguments: args } = request.params;
-  
-  try {
-    switch (name) {
-      case 'list_files': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        const start = args.parentId || root;
-        const maxDepth = parseInt(args.depth || '4', 10);
-        
-        if (!(await isDescendant(drive, start, root))) {
-          return { content: [{ type: 'text', text: 'Error: Not allowed' }], isError: true };
-        }
-        
-        const queue = [{ id: start, depth: 0 }];
-        const results = [];
-        while (queue.length) {
-          const node = queue.shift();
-          const list = await drive.files.list({
-            q: `'${node.id}' in parents and trashed=false`,
-            fields: 'files(id, name, mimeType, size, modifiedTime, parents)',
-            pageSize: 1000
-          });
-          for (const f of list.data.files || []) {
-            results.push({ ...f, depth: node.depth });
-            if (f.mimeType === 'application/vnd.google-apps.folder' && node.depth + 1 < maxDepth) {
-              queue.push({ id: f.id, depth: node.depth + 1 });
-            }
-          }
-        }
-        return { content: [{ type: 'text', text: JSON.stringify({ files: results }, null, 2) }] };
-      }
-      
-      case 'create_folder': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        const parent = args.parentId || root;
-        
-        if (!(await isDescendant(drive, parent, root))) {
-          return { content: [{ type: 'text', text: 'Error: Parent not allowed' }], isError: true };
-        }
-        
-        const resp = await drive.files.create({
-          requestBody: { name: args.name, mimeType: 'application/vnd.google-apps.folder', parents: [parent] },
-          fields: 'id, name'
-        });
-        return { content: [{ type: 'text', text: JSON.stringify({ folder: resp.data }, null, 2) }] };
-      }
-      
-      case 'upload_file': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        const parent = args.parentId || root;
-        
-        if (!(await isDescendant(drive, parent, root))) {
-          return { content: [{ type: 'text', text: 'Error: Parent not allowed' }], isError: true };
-        }
-        
-        const mediaBody = args.content ? Buffer.from(args.content, 'base64') : null;
-        
-        if (args.fileId) {
-          if (!(await isDescendant(drive, args.fileId, root))) {
-            return { content: [{ type: 'text', text: 'Error: Target not allowed' }], isError: true };
-          }
-          const resp = await drive.files.update({
-            fileId: args.fileId,
-            requestBody: { name: args.name, mimeType: args.mimeType },
-            media: mediaBody ? { mimeType: args.mimeType || 'application/octet-stream', body: mediaBody } : undefined,
-            fields: 'id, name'
-          });
-          return { content: [{ type: 'text', text: JSON.stringify({ updated: resp.data }, null, 2) }] };
-        } else {
-          const resp = await drive.files.create({
-            requestBody: { name: args.name, parents: [parent], mimeType: args.mimeType || 'text/markdown' },
-            media: mediaBody ? { mimeType: args.mimeType || 'text/markdown', body: mediaBody } : undefined,
-            fields: 'id, name'
-          });
-          return { content: [{ type: 'text', text: JSON.stringify({ created: resp.data }, null, 2) }] };
-        }
-      }
-      
-      case 'read_file': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        
-        if (!(await isDescendant(drive, args.fileId, root))) {
-          return { content: [{ type: 'text', text: 'Error: Not allowed' }], isError: true };
-        }
-        
-        const meta = await drive.files.get({ fileId: args.fileId, fields: 'id, name, mimeType' });
-        const mime = meta.data.mimeType;
-        
-        if (mime === 'application/vnd.google-apps.document') {
-          const x = await drive.files.export({ fileId: args.fileId, mimeType: 'text/plain' }, { responseType: 'text' });
-          return { content: [{ type: 'text', text: x.data }] };
-        }
-        
-        const dl = await drive.files.get({ fileId: args.fileId, alt: 'media' }, { responseType: 'text' });
-        return { content: [{ type: 'text', text: dl.data }] };
-      }
-      
-      case 'search_files': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        const q = args.query.trim();
-        
-        const nameMatches = await drive.files.list({
-          q: `name contains '${q.replace(/'/g, "\\'")}' and trashed=false`,
-          fields: 'files(id, name, mimeType, parents)',
-          pageSize: 100
-        });
-        
-        const filtered = [];
-        for (const f of (nameMatches.data.files || [])) {
-          if (await isDescendant(drive, f.id, root)) filtered.push(f);
-        }
-        
-        return { content: [{ type: 'text', text: JSON.stringify({ files: filtered }, null, 2) }] };
-      }
-      
-      case 'move_item': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        
-        if (!(await isDescendant(drive, args.id, root)) || !(await isDescendant(drive, args.newParentId, root))) {
-          return { content: [{ type: 'text', text: 'Error: Not allowed' }], isError: true };
-        }
-        
-        const meta = await drive.files.get({ fileId: args.id, fields: 'parents' });
-        const previousParents = meta.data.parents ? meta.data.parents.join(',') : '';
-        const updated = await drive.files.update({
-          fileId: args.id,
-          addParents: args.newParentId,
-          removeParents: previousParents,
-          fields: 'id, name, parents'
-        });
-        return { content: [{ type: 'text', text: JSON.stringify({ moved: updated.data }, null, 2) }] };
-      }
-      
-      case 'rename_item': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        
-        if (!(await isDescendant(drive, args.id, root))) {
-          return { content: [{ type: 'text', text: 'Error: Not allowed' }], isError: true };
-        }
-        
-        const r = await drive.files.update({
-          fileId: args.id,
-          requestBody: { name: args.newName },
-          fields: 'id, name'
-        });
-        return { content: [{ type: 'text', text: JSON.stringify({ renamed: r.data }, null, 2) }] };
-      }
-      
-      case 'delete_item': {
-        const drive = await getDrive();
-        const root = await ensureRootFolder();
-        
-        if (!(await isDescendant(drive, args.id, root))) {
-          return { content: [{ type: 'text', text: 'Error: Not allowed' }], isError: true };
-        }
-        
-        await drive.files.delete({ fileId: args.id });
-        return { content: [{ type: 'text', text: JSON.stringify({ deleted: args.id }, null, 2) }] };
-      }
-      
-      default:
-        return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
-    }
-  } catch (err) {
-    return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
-  }
-});
-
-// ========== UTILITY FUNCTIONS ==========
-
 function protectiveMiddleware(req, res, next) {
+  // If a shared secret is configured, require it in X-MCP-SECRET header
   if (MCP_SHARED_SECRET) {
     const got = req.get('X-MCP-SECRET') || '';
     if (!got || got !== MCP_SHARED_SECRET) {
@@ -349,10 +49,10 @@ function protectiveMiddleware(req, res, next) {
 }
 app.use(protectiveMiddleware);
 
+// Utilities for tokens
 function storeTokens(tokens) {
   fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens, null, 2));
 }
-
 function getStoredTokens() {
   try {
     return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
@@ -365,6 +65,7 @@ async function getDrive() {
   const tokens = getStoredTokens();
   if (!tokens) throw new Error('No tokens — authenticate at /auth');
   oauth2Client.setCredentials(tokens);
+  // googleapis handles refreshing with the oauth2Client if refresh_token present
   oauth2Client.on('tokens', (toks) => {
     const existing = getStoredTokens() || {};
     const merged = { ...existing, ...toks };
@@ -373,13 +74,16 @@ async function getDrive() {
   return google.drive({ version: 'v3', auth: oauth2Client });
 }
 
+// Ensure root folder exists and return its id
 async function ensureRootFolder() {
   const drive = await getDrive();
+  // search top-level folder with that name (not trashed)
   const name = DRIVE_FOLDER_NAME.replace(/'/g, "\\'");
   const q = `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const res = await drive.files.list({ q, fields: 'files(id, name, parents)', pageSize: 10 });
   if (res.data.files && res.data.files.length > 0) return res.data.files[0].id;
 
+  // create at root
   const created = await drive.files.create({
     requestBody: {
       name: DRIVE_FOLDER_NAME,
@@ -390,8 +94,10 @@ async function ensureRootFolder() {
   return created.data.id;
 }
 
+// Helper: check if file/folder is descendant of root
 async function isDescendant(drive, candidateId, rootId) {
   if (candidateId === rootId) return true;
+  // climb parent chain up to a sensible depth
   let toCheck = [candidateId];
   for (let depth = 0; depth < 30; depth++) {
     const next = [];
@@ -404,6 +110,7 @@ async function isDescendant(drive, candidateId, rootId) {
           next.push(p);
         }
       } catch (e) {
+        // if we cannot get metadata, assume false for this branch
         continue;
       }
     }
@@ -413,32 +120,30 @@ async function isDescendant(drive, candidateId, rootId) {
   return false;
 }
 
-// ========== REST API ROUTES ==========
+// ---------- ROUTES ----------
 
+// Info
 app.get('/info', async (req, res) => {
   res.json({
-    name: 'Claude Google Drive MCP (expanded with MCP protocol)',
-    folder: DRIVE_FOLDER_NAME,
-    mcpEnabled: true
+    name: 'Claude Google Drive MCP (expanded)',
+    folder: DRIVE_FOLDER_NAME
   });
 });
 
+// Start OAuth
 app.get('/auth', (req, res) => {
   const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
   res.redirect(url);
 });
 
-app.get('/authorize', (req, res) => {
-  const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: SCOPES, prompt: 'consent' });
-  res.redirect(url);
-});
-
+// OAuth callback
 app.get('/oauth2callback', async (req, res) => {
   try {
     if (!req.query.code) return res.status(400).send('Missing code');
     const { tokens } = await oauth2Client.getToken(req.query.code);
     storeTokens(tokens);
     oauth2Client.setCredentials(tokens);
+    // ensure root
     await ensureRootFolder();
     res.send('Authentication successful — you can close this tab.');
   } catch (err) {
@@ -447,18 +152,22 @@ app.get('/oauth2callback', async (req, res) => {
   }
 });
 
+// Recursive list: returns tree under parentId or root
 app.get('/list', async (req, res) => {
   try {
     const drive = await getDrive();
     const root = await ensureRootFolder();
     const start = req.query.parentId || root;
+    // verify start is descendant
     if (!(await isDescendant(drive, start, root))) return res.status(403).json({ error: 'Not allowed' });
 
+    // BFS traversal but limited to depth param (default 4)
     const maxDepth = parseInt(req.query.depth || '4', 10);
     const queue = [{ id: start, depth: 0 }];
     const results = [];
     while (queue.length) {
       const node = queue.shift();
+      // list children
       const list = await drive.files.list({
         q: `'${node.id}' in parents and trashed=false`,
         fields: 'files(id, name, mimeType, size, modifiedTime, parents)',
@@ -478,6 +187,7 @@ app.get('/list', async (req, res) => {
   }
 });
 
+// Metadata endpoint
 app.get('/meta/:id', async (req, res) => {
   try {
     const drive = await getDrive();
@@ -492,6 +202,7 @@ app.get('/meta/:id', async (req, res) => {
   }
 });
 
+// Download file (exports Google Docs to text, otherwise streams binary)
 app.get('/file/:id', async (req, res) => {
   try {
     const drive = await getDrive();
@@ -517,6 +228,7 @@ app.get('/file/:id', async (req, res) => {
   }
 });
 
+// Upload/create or update file. Supports base64 content (body.content) and optional fileId for update
 app.post('/upload', async (req, res) => {
   try {
     const { name, content, mimeType, parentId, fileId } = req.body;
@@ -528,9 +240,11 @@ app.post('/upload', async (req, res) => {
 
     if (!(await isDescendant(drive, parent, root))) return res.status(403).json({ error: 'Parent not allowed' });
 
+    // decode base64 content if provided; if no content and updating fileId, treat as metadata-only rename
     const mediaBody = content ? Buffer.from(content, 'base64') : null;
 
     if (fileId) {
+      // make sure target is descendant
       if (!(await isDescendant(drive, fileId, root))) return res.status(403).json({ error: 'Target not allowed' });
       const resp = await drive.files.update({
         fileId,
@@ -553,6 +267,7 @@ app.post('/upload', async (req, res) => {
   }
 });
 
+// Create folder under parent
 app.post('/folder', async (req, res) => {
   try {
     const { name, parentId } = req.body;
@@ -573,6 +288,7 @@ app.post('/folder', async (req, res) => {
   }
 });
 
+// Move file/folder to new parent
 app.post('/move', async (req, res) => {
   try {
     const { id, newParentId } = req.body;
@@ -581,6 +297,7 @@ app.post('/move', async (req, res) => {
     const root = await ensureRootFolder();
     if (!(await isDescendant(drive, id, root)) || !(await isDescendant(drive, newParentId, root))) return res.status(403).json({ error: 'Not allowed' });
 
+    // get current parents
     const meta = await drive.files.get({ fileId: id, fields: 'parents' });
     const previousParents = meta.data.parents ? meta.data.parents.join(',') : '';
     const updated = await drive.files.update({ fileId: id, addParents: newParentId, removeParents: previousParents, fields: 'id, name, parents' });
@@ -591,6 +308,7 @@ app.post('/move', async (req, res) => {
   }
 });
 
+// Batch delete - accepts array of ids
 app.post('/batch-delete', async (req, res) => {
   try {
     const { ids } = req.body;
@@ -612,6 +330,8 @@ app.post('/batch-delete', async (req, res) => {
   }
 });
 
+// Search by name and, for text files, can optionally do text extraction to search content
+// ?q=term&content=true
 app.get('/search', async (req, res) => {
   try {
     const q = (req.query.q || '').trim();
@@ -620,12 +340,14 @@ app.get('/search', async (req, res) => {
     const drive = await getDrive();
     const root = await ensureRootFolder();
 
+    // name-based search first (fast)
     const nameMatches = await drive.files.list({
       q: `name contains '${q.replace(/'/g, "\\'")}' and trashed=false`,
       fields: 'files(id, name, mimeType, parents)',
       pageSize: 100
     });
 
+    // filter to descendants
     const filtered = [];
     for (const f of (nameMatches.data.files || [])) {
       if (await isDescendant(drive, f.id, root)) filtered.push(f);
@@ -633,11 +355,13 @@ app.get('/search', async (req, res) => {
 
     if (!contentSearch) return res.json({ files: filtered });
 
+    // If contentSearch true, also search by exported text for text-like mime types (list of candidate mimes)
     const extras = [];
     const candidates = await drive.files.list({ q: `trashed=false`, fields: 'files(id, name, mimeType, parents)', pageSize: 1000 });
     for (const c of (candidates.data.files || [])) {
       if (!await isDescendant(drive, c.id, root)) continue;
       try {
+        // Only attempt for types we can export or that are plain text
         const mime = c.mimeType;
         let text = null;
         if (mime === 'application/vnd.google-apps.document') {
@@ -646,12 +370,15 @@ app.get('/search', async (req, res) => {
         } else if (mime.startsWith('text/') || mime.includes('json') || mime.includes('markdown') || mime.includes('csv')) {
           const r = await drive.files.get({ fileId: c.id, alt: 'media' }, { responseType: 'text' });
           text = r.data;
+        } else {
+          // skip binary
         }
         if (text && text.toLowerCase().includes(q.toLowerCase())) extras.push(c);
       } catch (e) {
         continue;
       }
     }
+    // combine unique
     const combined = [...filtered];
     for (const e of extras) if (!combined.find(x => x.id === e.id)) combined.push(e);
     res.json({ files: combined });
@@ -661,6 +388,7 @@ app.get('/search', async (req, res) => {
   }
 });
 
+// Rename
 app.post('/rename', async (req, res) => {
   try {
     const { id, newName } = req.body;
@@ -676,6 +404,7 @@ app.post('/rename', async (req, res) => {
   }
 });
 
+// Delete single
 app.delete('/delete/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -690,18 +419,8 @@ app.delete('/delete/:id', async (req, res) => {
   }
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, mcpEnabled: true }));
+// Health check
+app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Start Express server
+// Start
 app.listen(PORT, () => console.log(`MCP server listening on ${PORT}`));
-
-// Start MCP server for stdio transport
-async function main() {
-  const transport = new StdioServerTransport();
-  await mcpServer.connect(transport);
-  console.log('MCP protocol server started');
-}
-
-if (process.env.MCP_STDIO_MODE === 'true') {
-  main().catch(console.error);
-}
